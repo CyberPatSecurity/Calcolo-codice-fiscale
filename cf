@@ -1,0 +1,242 @@
+import os
+import re
+import requests
+from bs4 import BeautifulSoup
+import string
+
+# Dizionario globale dei codici catastali
+CODICI_CATASTALI = {}
+
+def scarica_codici_comuni():
+    """
+    Scarica i codici catastali dei comuni italiani dal sito ufficiale e li salva in un file di testo (comuni.txt).
+    """
+    url = "https://dait.interno.gov.it/territorio-e-autonomie-locali/sut/elenco_codici_comuni.php"
+    response = requests.get(url)
+    
+    if response.status_code == 200:
+        soup = BeautifulSoup(response.content, "html.parser")
+        tabella = soup.find("table", {"class": "table-striped"})
+        righe = tabella.find_all("tr")[1:]  # Salta l'intestazione
+        with open("comuni.txt", "w") as file:
+            for riga in righe:
+                colonne = riga.find_all("td")
+                comune = colonne[1].text.strip()
+                codice_belfiore = colonne[5].text.strip()
+                file.write(f"{comune},{codice_belfiore}\n")
+        print("Codici comuni scaricati correttamente.")
+    else:
+        print("Errore durante il download dei codici comuni.")
+        
+def leggi_codici_comuni():
+    global CODICI_CATASTALI  # Assicurati di usare il dizionario corretto
+    try:
+        with open("comuni.txt", "r") as file:
+            for linea in file:
+                comune, codice = linea.strip().split(",")
+                CODICI_CATASTALI[comune.strip().upper()] = codice.strip()  # Usa strip() per rimuovere spazi
+    except FileNotFoundError:
+        print("File dei codici catastali non trovato. Scaricando i codici comuni...")
+        scarica_codici_comuni()  # Chiama la funzione per scaricare i codici
+        leggi_codici_comuni()  # Riprova a leggere i codici dopo il download
+    except Exception as e:
+        print(f"Errore: {e}")
+
+def calcola_codice_fiscale():
+    """
+    Calcola il codice fiscale basato sui dati dell'utente.
+    """
+    # Lettura dei dati dell'utente
+    nome = input("Inserisci il nome: ").strip().upper()
+    cognome = input("Inserisci il cognome: ").strip().upper()
+    data_nascita = input("Inserisci la data di nascita (GG/MM/AAAA): ").strip()
+    sesso = input("Inserisci il sesso (M/F): ").strip().upper()
+    comune = input("Inserisci il comune di nascita: ").strip().upper()
+
+    try:
+        codice_fiscale = calcola_codice_fiscale_utente(nome, cognome, data_nascita, sesso, comune)
+        print(f"Il codice fiscale calcolato Ã¨: {codice_fiscale}")
+    except ValueError as e:
+        print(f"Errore: {e}")
+
+def calcola_codice_fiscale_utente(nome, cognome, data_nascita, sesso, comune):
+    """
+    Funzione interna per il calcolo del codice fiscale di un utente.
+    """
+    # Step 1: Codice cognome
+    cognome_cod = estrai_consonanti(cognome)
+    cognome_cod += estrai_vocali(cognome)
+    cognome_cod = (cognome_cod + 'XXX')[:3]
+
+    # Step 2: Codice nome
+    nome_cod = estrai_consonanti(nome)
+    if len(nome_cod) >= 4:
+        nome_cod = nome_cod[0] + nome_cod[2] + nome_cod[3]
+    nome_cod += estrai_vocali(nome)
+    nome_cod = (nome_cod + 'XXX')[:3]
+
+    # Step 3: Data di nascita e sesso
+    anno_cod = data_nascita[-2:]
+    mese_cod = mese_codice(data_nascita[3:5])
+    giorno = int(data_nascita[:2])
+    if sesso == 'F':
+        giorno += 40  # Aggiungi 40 se il sesso Ã¨ femminile
+    giorno_cod = f'{giorno:02}'  # Assicurati che il giorno sia sempre in due cifre
+
+    # Step 4: Codice catastale del comune
+    comune_cod = CODICI_CATASTALI.get(comune.upper(), "XXXX")
+    if comune_cod == "XXXX":
+        raise ValueError(f"Codice catastale non trovato per il comune: {comune}")
+
+    # Step 5: Carattere di controllo
+    codice_iniziale = cognome_cod + nome_cod + anno_cod + mese_cod + giorno_cod + comune_cod
+    carattere_controllo = calcola_carattere_di_controllo(codice_iniziale)
+
+    return codice_iniziale + carattere_controllo
+
+
+def codice_fiscale_inverso():
+    """
+    Risale ai dati anagrafici partendo da un codice fiscale esistente.
+    """
+    codice_fiscale = input("Inserisci il codice fiscale: ").strip().upper()
+    try:
+        dati_personali = calcola_fiscale_inverso(codice_fiscale)
+        print("Dati anagrafici estratti dal codice fiscale:")
+        print(f"Nome: {dati_personali['nome']}")
+        print(f"Cognome: {dati_personali['cognome']}")
+        print(f"Data di nascita: {dati_personali['data_nascita']}")
+        print(f"Sesso: {dati_personali['sesso']}")
+        print(f"Comune di nascita: {dati_personali['comune']}")        
+    except ValueError as e:
+        print(f"Errore: {e}")
+
+def trova_comune_da_codice(codice):
+    for comune, cod in CODICI_CATASTALI.items():
+        if cod == codice:
+            return comune
+
+def calcola_fiscale_inverso(codice_fiscale):
+    """
+    Decodifica un codice fiscale nei dati originali (nome, cognome, data di nascita, sesso, comune).
+    """
+    if len(codice_fiscale) != 16:
+        raise ValueError("Codice fiscale non valido. Deve essere lungo 16 caratteri.")
+
+    # Step 1: Cognome e nome
+    cognome_codice = codice_fiscale[:3]
+    nome_codice = codice_fiscale[3:6]
+
+    # Step 2: Anno e mese di nascita
+    anno = int(codice_fiscale[6:8])
+    mese_codice = codice_fiscale[8]
+    mese = mese_inverso(mese_codice)
+
+    # Step 3: Giorno di nascita e sesso
+    giorno_codice = int(codice_fiscale[9:11])
+    if giorno_codice > 40:
+        sesso = 'F'
+        giorno = giorno_codice - 40
+    else:
+        sesso = 'M'
+        giorno = giorno_codice
+        
+    # Step 4: Comune di nascita
+    codice_catastale = codice_fiscale[11:15]
+
+    # Cerca il codice catastale nel dizionario usando un ciclo for
+    comune = None  # Inizializza comune come None
+    for c, cod in CODICI_CATASTALI.items():
+        if cod == codice_catastale:
+            comune = c
+            break  # Esci dal ciclo una volta trovato il comune
+    
+    if comune is None:
+        raise ValueError(f"Comune non trovato per il codice catastale: {codice_catastale}")
+
+    # Step 5: Verifica carattere di controllo
+    carattere_controllo = codice_fiscale[15]
+    if carattere_controllo != calcola_carattere_di_controllo(codice_fiscale[:15]):
+        raise ValueError("Carattere di controllo non valido.")
+ 
+    return {
+        "cognome": cognome_codice,
+        "nome": nome_codice,
+        "data_nascita": f"{giorno}/{mese}/{anno}",
+        "sesso": sesso,
+        "comune": comune
+    }
+
+
+# Funzioni di supporto
+
+def estrai_consonanti(parola):
+    return ''.join([c for c in parola if c in string.ascii_letters and c.lower() not in 'aeiou'])
+
+def estrai_vocali(parola):
+    return ''.join([v for v in parola if v in string.ascii_letters and v.lower() in 'aeiou'])
+
+def mese_codice(mese):
+    codici_mese = {
+        '01': 'A', '02': 'B', '03': 'C', '04': 'D', '05': 'E', '06': 'H',
+        '07': 'L', '08': 'M', '09': 'P', '10': 'R', '11': 'S', '12': 'T'
+    }
+    return codici_mese.get(mese)
+
+def mese_inverso(codice_mese):
+    codici_mese_inverso = {
+        'A': '01', 'B': '02', 'C': '03', 'D': '04', 'E': '05', 'H': '06',
+        'L': '07', 'M': '08', 'P': '09', 'R': '10', 'S': '11', 'T': '12'
+    }
+    return codici_mese_inverso.get(codice_mese)
+
+def get_comune_by_codice_catastale(codice):
+    return CODICI_CATASTALI.get(codice)
+
+def calcola_carattere_di_controllo(codice_parziale):
+    """
+    Calcola il carattere di controllo del codice fiscale.
+    """
+    # Valori per i caratteri nelle posizioni dispari (0, 2, 4, ...)
+    valori_dispari = {
+        '0': 1, '1': 0, '2': 5, '3': 7, '4': 9, '5': 13, '6': 15, '7': 17, '8': 19, '9': 21,
+        'A': 1, 'B': 0, 'C': 5, 'D': 7, 'E': 9, 'F': 13, 'G': 15, 'H': 17, 'I': 19, 'J': 21,
+        'K': 2, 'L': 4, 'M': 18, 'N': 20, 'O': 11, 'P': 3, 'Q': 6, 'R': 8, 'S': 12, 'T': 14,
+        'U': 16, 'V': 10, 'W': 22, 'X': 25, 'Y': 24, 'Z': 23
+    }
+
+    # Valori per i caratteri nelle posizioni pari (1, 3, 5, ...)
+    valori_pari = {
+        '0': 0, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9,
+        'A': 0, 'B': 1, 'C': 2, 'D': 3, 'E': 4, 'F': 5, 'G': 6, 'H': 7, 'I': 8, 'J': 9,
+        'K': 10, 'L': 11, 'M': 12, 'N': 13, 'O': 14, 'P': 15, 'Q': 16, 'R': 17, 'S': 18, 'T': 19,
+        'U': 20, 'V': 21, 'W': 22, 'X': 23, 'Y': 24, 'Z': 25
+    }
+
+    somma = 0
+    for i, char in enumerate(codice_parziale):
+        if i % 2 == 0:  # Posizioni dispari (0, 2, 4, ...)
+            somma += valori_dispari.get(char, 0)
+        else:  # Posizioni pari (1, 3, 5, ...)
+            somma += valori_pari.get(char, 0)
+
+    caratteri_di_controllo = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    return caratteri_di_controllo[somma % 26]
+
+# Main program
+if __name__ == "__main__":
+    leggi_codici_comuni()
+    while True:
+        print("\n1. Calcola codice fiscale")
+        print("2. Decodifica codice fiscale")
+        print("3. Esci")
+        scelta = input("Seleziona un'opzione: ").strip()
+
+        if scelta == "1":
+            calcola_codice_fiscale()
+        elif scelta == "2":
+            codice_fiscale_inverso()
+        elif scelta == "3":
+            break
+        else:
+            print("Opzione non valida. Riprova.")
